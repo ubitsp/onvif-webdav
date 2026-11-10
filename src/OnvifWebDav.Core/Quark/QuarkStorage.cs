@@ -218,6 +218,12 @@ public sealed class QuarkStorage : IRemoteStorage
         try
         {
             var parentFid = await EnsureDirectoryLockedAsync(dir, ct).ConfigureAwait(false);
+
+            // 夸克**不支持同名覆盖**：同名上传会变成 "xxx(1).json" 这样的副本，
+            // 而按名字读永远读到最初那份 —— 索引于是永远停留在第一条录像。
+            // 覆盖语义只能自己做：先删同名，再传新的。
+            await DeleteFileIfExistsLockedAsync(key, parentFid, name, ct).ConfigureAwait(false);
+
             fid = await UploadLockedAsync(parentFid, name, localFile, fileInfo, progress, ct).ConfigureAwait(false);
 
             _fileFids[key] = fid;
@@ -234,6 +240,48 @@ public sealed class QuarkStorage : IRemoteStorage
         }
 
         _log?.Info("quark", $"上传完成 {key} → fid={fid}");
+    }
+
+    /// <summary>
+    /// 上传前删掉同名文件，模拟"覆盖"语义。调用方必须已持有 _gate。
+    ///
+    /// 夸克的 <c>file/upload/pre</c> 遇到同名文件不会覆盖，而是让 <c>finish</c> 生成
+    /// <c>name(1).ext</c>、<c>name(2).ext</c> …… 而所有"按路径读"的地方
+    /// （StatAsync / GetStringWithEtagAsync）都是按名字精确匹配，
+    /// 结果就是**永远读到最初那份**。
+    ///
+    /// 索引文件每天被覆盖几十次，正是受害者：主文件停在第一条录像，
+    /// 后面每条都进了新副本 —— 表现为"一天只有一个视频"。
+    /// </summary>
+    private async Task DeleteFileIfExistsLockedAsync(string key, string parentFid, string name, CancellationToken ct)
+    {
+        string? fid = null;
+
+        // 本进程写过这个路径 → 映射表里就有 fid，直接删，省一次列目录
+        if (!_fileFids.TryGetValue(key, out fid))
+        {
+            // 映射表没有（首次写 / 换进程后映射丢失），列一次父目录按名字找
+            fid = await FindChildFidAsync(parentFid, name, expectDir: false, ct).ConfigureAwait(false);
+        }
+
+        if (string.IsNullOrEmpty(fid)) return;
+
+        try
+        {
+            // action_type=40 是彻底删除。这里刻意不用 2（回收站）：
+            // 索引每天覆盖几十次，进回收站会迅速堆成一大堆垃圾。
+            // 索引本身是缓存，删了能从 clips 目录重建，彻底删除可接受。
+            await _api.DeleteAsync(new[] { fid }, 40, ct).ConfigureAwait(false);
+            _log?.Info("quark", $"覆盖写入前已删除旧文件：{key}");
+        }
+        catch (QuarkApiException ex)
+        {
+            // 删不掉就继续传 —— 大不了生成副本，不能让上传整体失败
+            _log?.Warn("quark", $"删除旧文件失败（{key}）：{ex.Message}，可能产生副本");
+        }
+
+        _fileFids.Remove(key);
+        _statCache.Remove(key);
     }
 
     /// <summary>调用方必须已持有 _gate。</summary>

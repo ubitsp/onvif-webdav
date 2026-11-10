@@ -59,6 +59,8 @@ internal static class Program
                 "quark-page" => await QuarkPageProbeRunner.RunAsync(o).ConfigureAwait(false),
                 "quark-launch" => await QuarkLaunchProbeRunner.RunAsync(o).ConfigureAwait(false),
                 "quark-ls" => await QuarkListRunner.RunAsync(o).ConfigureAwait(false),
+                "quark-overwrite" => await QuarkOverwriteRunner.RunAsync(o).ConfigureAwait(false),
+                "quark-fix-index" => await QuarkFixIndexRunner.RunAsync(o).ConfigureAwait(false),
                 "events" => await EventsAsync(o).ConfigureAwait(false),
                 "notify-test" => await NotifyTestAsync(o).ConfigureAwait(false),
                 "parse-notify" => ParseNotifyFile(o),
@@ -145,6 +147,14 @@ internal static class Program
               quark-storage [--bigmb 20] [--port 9222] [--base URL]
                   用 IRemoteStorage 契约测夸克后端：建目录 → 小文件 → 读回 → 列目录
                   → 下载 → 20MB 多分片 → 配额 → 映射表重建 → 删除。
+
+              quark-fix-index [--apply] [--dir cam1/index] [--root /onvif]
+                  修复"同名不覆盖"留下的索引副本：每组挑最近修改的那份写回主文件名，
+                  再删掉其余 (N) 副本。默认只预览，加 --apply 才执行。
+
+              quark-overwrite [--port 9222]
+                  回归测试：同一路径连写 3 次，目录里必须始终只有 1 个文件，
+                  且读回内容是最新那次（验证"同名不覆盖"的 bug 已修）。
 
               quark-ls [--path /] [--depth 2] [--root /onvif] [--port 9222]
                   列夸克网盘目录（递归）。排查"日志说上传成功但网盘看不到"时先跑这个。
