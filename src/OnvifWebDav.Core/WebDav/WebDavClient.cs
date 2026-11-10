@@ -5,37 +5,9 @@ using System.Text;
 using System.Xml.Linq;
 using OnvifWebDav.Config;
 using OnvifWebDav.Diagnostics;
+using OnvifWebDav.Storage;
 
 namespace OnvifWebDav.WebDav;
-
-public sealed record DavEntry(
-    string Href, bool IsCollection, long Length, DateTimeOffset? LastModified, string? ETag)
-{
-    public string Name => Uri.UnescapeDataString(WebDavPath.FileName(Href.TrimEnd('/')));
-}
-
-/// <summary>云端配额（RFC 4331）。aliyundrive-webdav 支持，但有些服务端不返回。</summary>
-public sealed record StorageQuota(long? UsedBytes, long? AvailableBytes, DateTime CheckedUtc)
-{
-    private const double Gb = 1024d * 1024d * 1024d;
-
-    public long? TotalBytes => UsedBytes is { } u && AvailableBytes is { } a ? u + a : null;
-    public double UsedGb => UsedBytes is { } u ? u / Gb : -1;
-    public double AvailableGb => AvailableBytes is { } a ? a / Gb : -1;
-    public double TotalGb => TotalBytes is { } t ? t / Gb : -1;
-
-    public string Describe()
-    {
-        if (AvailableBytes is null && UsedBytes is null) return "未知";
-
-        var parts = new List<string>(3);
-        if (TotalBytes is not null) parts.Add($"总 {TotalGb:F0} GB");
-        if (UsedBytes is not null) parts.Add($"已用 {UsedGb:F1} GB");
-        if (AvailableBytes is not null) parts.Add($"剩余 {AvailableGb:F1} GB");
-
-        return string.Join(" / ", parts) + $"（{CheckedUtc.ToLocalTime():HH:mm} 查询）";
-    }
-}
 
 /// <summary>测试的单个步骤，用于精确定位"卡在哪一步"。</summary>
 public sealed record DavTestStep(string Name, bool Ok, string Detail)
@@ -58,7 +30,7 @@ public sealed class WebDavException : Exception
 /// OPTIONS / MKCOL / PUT / GET / HEAD / PROPFIND / MOVE / DELETE。
 /// 认证：先 Basic（省一次往返），401 且服务器要 Digest 时自动切 RFC7616 Digest 并重试一次。
 /// </summary>
-public sealed class WebDavClient : IDisposable
+public sealed class WebDavClient : IRemoteStorage
 {
     private enum AuthKind { Unknown, Basic, Digest, None }
 
@@ -211,6 +183,22 @@ public sealed class WebDavClient : IDisposable
     private TimeSpan TransferTimeout => TimeSpan.FromSeconds(Math.Clamp(_cfg.TimeoutSeconds * 10, 120, 3600));
 
     // ---------------- 基础操作 ----------------
+
+    // ==================== IRemoteStorage ====================
+
+    public string DisplayName => "WebDAV";
+
+    /// <summary>配置里探测不到时默认当作支持 MOVE（Nextcloud/nginx 都支持）。</summary>
+    public bool SupportsMove => _cfg.SupportsMove ?? true;
+
+    /// <summary>WebDAV 后端删除就是真删，配额立即回来。</summary>
+    public bool QuotaReleasesImmediately => true;
+
+    Task IRemoteStorage.EnsureDirectoryAsync(string relativeDir, CancellationToken ct) =>
+        EnsureCollectionsAsync(relativeDir, ct);
+
+    Task<List<RemoteEntry>> IRemoteStorage.ListAsync(string relativePath, int depth, CancellationToken ct) =>
+        PropFindAsync(relativePath, depth, ct);
 
     public async Task EnsureCollectionsAsync(string relativeDir, CancellationToken ct)
     {
@@ -552,7 +540,7 @@ public sealed class WebDavClient : IDisposable
         File.Move(tmp, localFile);
     }
 
-    public async Task<List<DavEntry>> PropFindAsync(string relativePath, int depth, CancellationToken ct)
+    public async Task<List<RemoteEntry>> PropFindAsync(string relativePath, int depth, CancellationToken ct)
     {
         var body = """
                    <?xml version="1.0" encoding="utf-8"?>
@@ -568,13 +556,13 @@ public sealed class WebDavClient : IDisposable
             req => req.Headers.TryAddWithoutValidation("Depth", depth.ToString()),
             Timeout, ct).ConfigureAwait(false);
 
-        if (resp.StatusCode == HttpStatusCode.NotFound) return new List<DavEntry>();
+        if (resp.StatusCode == HttpStatusCode.NotFound) return new List<RemoteEntry>();
         if (!resp.IsSuccessStatusCode)
             throw new WebDavException($"列目录失败 {relativePath} → HTTP {(int)resp.StatusCode}",
                 (int)resp.StatusCode);
 
         var xml = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-        var list = new List<DavEntry>();
+        var list = new List<RemoteEntry>();
 
         try
         {
@@ -596,7 +584,7 @@ public sealed class WebDavClient : IDisposable
 
                 var etag = prop?.Element(Dav + "getetag")?.Value;
 
-                list.Add(new DavEntry(href, isCollection, length, lastMod, etag));
+                list.Add(new RemoteEntry(href, isCollection, length, lastMod, etag));
             }
         }
         catch (Exception ex)

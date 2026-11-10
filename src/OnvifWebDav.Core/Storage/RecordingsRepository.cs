@@ -7,10 +7,10 @@ namespace OnvifWebDav.Storage;
 /// <summary>网页端读录像的统一入口：索引 + 本地缓存 + WebDAV 全部收在这里，Web 层不碰细节。</summary>
 public sealed class RecordingsRepository
 {
-    private readonly Func<WebDavClient?> _davFactory;
+    private readonly Func<IRemoteStorage?> _davFactory;
     private readonly MediaCache _cache;
     private readonly AppLog _log;
-    private WebDavClient? _dav;
+    private IRemoteStorage? _dav;
 
     private readonly object _indexGate = new();
 
@@ -27,14 +27,14 @@ public sealed class RecordingsRepository
     private static readonly TimeSpan IndexCacheTtl = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan IndexFailTtl = TimeSpan.FromSeconds(30);
 
-    public RecordingsRepository(Func<WebDavClient?> davFactory, MediaCache cache, AppLog log)
+    public RecordingsRepository(Func<IRemoteStorage?> davFactory, MediaCache cache, AppLog log)
     {
         _davFactory = davFactory;
         _cache = cache;
         _log = log;
     }
 
-    private WebDavClient Dav => _dav ??= _davFactory()
+    private IRemoteStorage Dav => _dav ??= _davFactory()
         ?? throw new InvalidOperationException("WebDAV 尚未配置");
 
     public async Task<List<DateTime>> GetDatesAsync(string cameraId, CancellationToken ct)

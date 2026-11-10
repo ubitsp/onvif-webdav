@@ -51,7 +51,7 @@ public sealed class RetentionPruner
 {
     public sealed record PruneResult(int DaysDeleted, int ClipsDeleted, StorageQuota? After, bool ReachedTarget);
 
-    public async Task<PruneResult> PruneOldestAsync(WebDavClient dav, string cameraId, long targetFreeBytes,
+    public async Task<PruneResult> PruneOldestAsync(IRemoteStorage dav, string cameraId, long targetFreeBytes,
         AppLog? log, CancellationToken ct)
     {
         var index = new RemoteClipIndex(dav, log);
@@ -72,6 +72,14 @@ public sealed class RetentionPruner
             return new PruneResult(0, 0, initial, true);
         }
 
+        // 还差多少才达标。用于"配额不会立刻回来"的后端做累计估算。
+        var needBytes = initial?.AvailableBytes is { } f0 ? Math.Max(0, targetFreeBytes - f0) : targetFreeBytes;
+
+        // 夸克这类后端删除只进回收站，配额要等回收站清理才回来。
+        // 如果还是按"删完查配额看涨没涨"来判断，会永远不达标，然后把所有天的录像全删光。
+        var countFreedBytes = !dav.QuotaReleasesImmediately;
+        var freedBytes = 0L;
+
         var days = 0;
         var clips = 0;
         StorageQuota? quota = null;
@@ -85,7 +93,11 @@ public sealed class RetentionPruner
 
             foreach (var clip in list)
             {
-                try { await dav.DeleteAsync(clip.Path, ct).ConfigureAwait(false); }
+                try
+                {
+                    await dav.DeleteAsync(clip.Path, ct).ConfigureAwait(false);
+                    freedBytes += clip.SizeBytes;
+                }
                 catch (Exception ex) { log?.Warn("retention", $"删除 {clip.Path} 失败：{ex.Message}"); }
 
                 if (!string.IsNullOrWhiteSpace(clip.Thumb))
@@ -108,6 +120,21 @@ public sealed class RetentionPruner
             days++;
             clips += list.Count;
             log?.Info("retention", $"已删除 {date:yyyy-MM-dd} 的 {list.Count} 段录像");
+
+            // 后端删除后配额不立即释放（夸克进回收站）：按累计删除量判断，别去查配额 ——
+            // 查了也不会涨，判断逻辑会一直认为"没达标"，最后把录像删光
+            if (countFreedBytes)
+            {
+                if (freedBytes >= needBytes)
+                {
+                    log?.Info("retention",
+                        $"已删除 {freedBytes / 1024d / 1024 / 1024:F2} GB（目标 {needBytes / 1024d / 1024 / 1024:F2} GB），" +
+                        "但本后端删除进回收站，配额要等回收站清理后才真正回来");
+                    return new PruneResult(days, clips, quota, true);
+                }
+
+                continue;
+            }
 
             quota = await dav.GetQuotaAsync(ct).ConfigureAwait(false);
 

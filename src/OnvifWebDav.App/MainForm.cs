@@ -12,7 +12,7 @@ internal sealed class MainForm : Form
 
     private readonly StatusPanel _statusPanel;
     private readonly CameraPanel _cameraPanel;
-    private readonly WebDavPanel _webDavPanel;
+    private readonly StoragePanel _storagePanel;
     private readonly RecordingPanel _recordingPanel;
     private readonly WebPanel _webPanel;
     private readonly EventTestPanel _eventPanel;
@@ -38,7 +38,7 @@ internal sealed class MainForm : Form
 
         _statusPanel = new StatusPanel();
         _cameraPanel = new CameraPanel(runtime);
-        _webDavPanel = new WebDavPanel(runtime);
+        _storagePanel = new StoragePanel(runtime);
         _recordingPanel = new RecordingPanel();
         _webPanel = new WebPanel();
         _eventPanel = new EventTestPanel(runtime);
@@ -47,7 +47,7 @@ internal sealed class MainForm : Form
         var tabs = new TabControl { Dock = DockStyle.Fill, Padding = new Point(14, 6) };
         tabs.TabPages.Add(Wrap("状态", _statusPanel));
         tabs.TabPages.Add(Wrap("摄像头", _cameraPanel));
-        tabs.TabPages.Add(Wrap("WebDAV", _webDavPanel));
+        tabs.TabPages.Add(Wrap("存储", _storagePanel));
         tabs.TabPages.Add(Wrap("录制", _recordingPanel));
         tabs.TabPages.Add(Wrap("网页", _webPanel));
         tabs.TabPages.Add(Wrap("事件自检", _eventPanel));
@@ -133,7 +133,7 @@ internal sealed class MainForm : Form
     private void BindAll()
     {
         _cameraPanel.Bind(_runtime.Config);
-        _webDavPanel.Bind(_runtime.Config);
+        _storagePanel.Bind(_runtime.Config);
         _recordingPanel.Bind(_runtime.Config);
         _webPanel.Bind(_runtime.Config);
     }
@@ -141,7 +141,7 @@ internal sealed class MainForm : Form
     private void CollectAll()
     {
         _cameraPanel.Collect(_runtime.Config);
-        _webDavPanel.Collect(_runtime.Config);
+        _storagePanel.Collect(_runtime.Config);
         _recordingPanel.Collect(_runtime.Config);
         _webPanel.Collect(_runtime.Config);
     }

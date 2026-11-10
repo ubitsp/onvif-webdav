@@ -11,6 +11,7 @@ using OnvifWebDav.Media;
 using OnvifWebDav.Net;
 using OnvifWebDav.Onvif;
 using OnvifWebDav.Pipeline;
+using OnvifWebDav.Quark;
 using OnvifWebDav.Storage;
 using OnvifWebDav.WebDav;
 
@@ -50,6 +51,14 @@ internal static class Program
                 "ring-info" => RingInfo(o),
                 "spool-test" => SpoolTest(o),
                 "upload-race" => await UploadRaceAsync(o).ConfigureAwait(false),
+                "quark-cdp" => await QuarkCdpAsync(o).ConfigureAwait(false),
+                "quark-probe" => await QuarkProbeRunner.RunAsync(o).ConfigureAwait(false),
+                "quark-selftest" => await QuarkSelfTestRunner.RunAsync(o).ConfigureAwait(false),
+                "quark-capture" => await QuarkCaptureRunner.RunAsync(o).ConfigureAwait(false),
+                "quark-storage" => await QuarkStorageTestRunner.RunAsync(o).ConfigureAwait(false),
+                "quark-page" => await QuarkPageProbeRunner.RunAsync(o).ConfigureAwait(false),
+                "quark-launch" => await QuarkLaunchProbeRunner.RunAsync(o).ConfigureAwait(false),
+                "quark-ls" => await QuarkListRunner.RunAsync(o).ConfigureAwait(false),
                 "events" => await EventsAsync(o).ConfigureAwait(false),
                 "notify-test" => await NotifyTestAsync(o).ConfigureAwait(false),
                 "parse-notify" => ParseNotifyFile(o),
@@ -114,6 +123,44 @@ internal static class Program
 
               upload-race --url <URL> [--user u] [--pass p] [--root /onvif] [--jobs 4]
                   并发上传压测：2 个 worker 抢 N 个任务，断言每个任务只上传一次。
+
+              quark-cdp [--port 9222] [--show]
+                  阶段 0.2：从夸克浏览器的调试端口读 Cookie 和 UA，不发任何外网请求。
+                  需要浏览器以 --remote-debugging-port=9222 启动并已登录 pan.quark.cn。
+                  --show 会打印完整 Cookie（属账号凭证，别外传）。
+
+              quark-probe [--via cdp] [--ua browser|client] [--base https://drive-pc.quark.cn] [--port 9222]
+                          [--method GET|POST] [--matrix]
+                  阶段 0.3/0.4：只发两个只读请求（member 配额、file/sort 根目录），
+                  判断 .NET 的 TLS 指纹会不会被夸克拦。
+                  --via cdp 改为在夸克页面内用 fetch 发（指纹即浏览器，可绕过直连被拦）。
+                  --matrix 扫 host × method 全组合，一次找出可用组合（推荐先用这个）。
+                  注意：夸克的查询接口只接受 GET，POST 会返回 405。
+
+              quark-selftest [--write] [--port 9222] [--base https://drive-pc.quark.cn]
+                  验证夸克的写链路。不带 --write 只做只读复核（member + file/sort）。
+                  带 --write 会建一个临时目录，传 15 字节，读回比对，然后彻底删除。
+                  上传走 upload/pre → OSS 分片 PUT → upload/finish 三步。
+
+              quark-storage [--bigmb 20] [--port 9222] [--base URL]
+                  用 IRemoteStorage 契约测夸克后端：建目录 → 小文件 → 读回 → 列目录
+                  → 下载 → 20MB 多分片 → 配额 → 映射表重建 → 删除。
+
+              quark-ls [--path /] [--depth 2] [--root /onvif] [--port 9222]
+                  列夸克网盘目录（递归）。排查"日志说上传成功但网盘看不到"时先跑这个。
+
+              quark-launch [--port 9222] [--exe <quark.exe 路径>]
+                  诊断能否自动拉起夸克客户端，以及为什么拉不起来。
+                  只查不动：不启动、不杀任何进程。
+
+              quark-page [--port 9222]
+                  检测夸克页面里存了哪些认证信息（document.cookie / localStorage /
+                  sessionStorage / IndexedDB）。只打印名字和长度，不打印值。
+
+              quark-capture [--seconds 240] [--port 9222]
+                  在夸克页面里 hook fetch/XHR，抓网页版上传时的真实请求参数。
+                  先跑本命令，然后在网页里手动上传一个小文件，会打印 URL 和 body。
+                  --ua client 换成 Electron 客户端 UA 再试一次。
                   配合 mock-dav 使用。
 
               ring-info [--dir <目录>] [--limit-mb 2048] [--keep 600] [--mbps 4]
@@ -686,6 +733,84 @@ internal static class Program
     /// 环形目录检查。填内存盘路径先跑一遍，确认程序真的会用那个盘、容量够不够。
     /// 不需要摄像头、不需要 ffmpeg。
     /// </summary>
+    /// <summary>
+    /// 阶段 0.2：只读 CDP 的 Cookie 和 UA，**不发任何外网请求**。
+    /// 回答"程序到底能不能拿到夸克的有效会话"，是后续所有工作的前提。
+    /// </summary>
+    private static async Task<int> QuarkCdpAsync(Dictionary<string, string> o)
+    {
+        var port = int.TryParse(o.GetValueOrDefault("port", "9222"), out var p) && p > 0 ? p : 9222;
+        var show = o.ContainsKey("show");
+        var log = new AppLog(Path.Combine(Path.GetTempPath(), "owd-probe-logs"));
+
+        using var cdp = new QuarkCdpClient(port, log);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        Console.WriteLine($"连接 CDP 127.0.0.1:{port} …");
+
+        var info = await cdp.TryGetBrowserInfoAsync(cts.Token).ConfigureAwait(false);
+        if (info is null)
+        {
+            Console.WriteLine("✘ 连不上调试端口。请确认夸克浏览器是这样启动的：");
+            Console.WriteLine($"    \"<夸克安装目录>\\quark.exe\" --remote-debugging-port={port}");
+            Console.WriteLine("  （如果浏览器已经在运行，先完全退出再带参数启动）");
+            return 1;
+        }
+
+        Console.WriteLine("✔ 浏览器：" + info.Browser);
+        Console.WriteLine("  UA：" + info.UserAgent);
+
+        var session = await cdp.TryGetSessionAsync(cts.Token).ConfigureAwait(false);
+        if (session is null)
+        {
+            Console.WriteLine();
+            Console.WriteLine("✘ 拿不到夸克 Cookie。常见原因：");
+            Console.WriteLine("  1) 浏览器里没登录 pan.quark.cn");
+            Console.WriteLine("  2) 登录的是另一个浏览器配置（多账号/隐私窗口）");
+            Console.WriteLine("  3) 页面还没加载完，稍等几秒重试");
+            return 1;
+        }
+
+        var names = session.Cookie
+            .Split(';', StringSplitOptions.RemoveEmptyEntries)
+            .Select(x => x.Trim())
+            .Where(x => x.Contains('='))
+            .Select(x => x[..x.IndexOf('=')])
+            .ToList();
+
+        Console.WriteLine();
+        Console.WriteLine($"✔ Cookie 共 {names.Count} 项，拼接长度 {session.Cookie.Length}");
+        Console.WriteLine("  名称：" + string.Join(", ", names));
+
+        var hasPuus = names.Contains("__puus");
+        var hasPus = names.Contains("__pus");
+
+        Console.WriteLine($"  __puus：{(hasPuus ? "✔ 有" : "✘ 缺 —— 多数 API 会返回未登录")}");
+        Console.WriteLine($"  __pus ：{(hasPus ? "✔ 有" : "— 没有")}");
+
+        Console.WriteLine();
+
+        if (!hasPuus)
+        {
+            Console.WriteLine("✘ 缺少 __puus，先别往下走。去浏览器里重新登录夸克网盘再试。");
+            return 1;
+        }
+
+        if (show)
+        {
+            Console.WriteLine("完整 Cookie（属于账号凭证，别贴到聊天或提交进仓库）：");
+            Console.WriteLine(session.Cookie);
+            Console.WriteLine();
+        }
+        else
+        {
+            Console.WriteLine("需要复制完整 Cookie 手工填进配置时，加 --show 参数。");
+        }
+
+        Console.WriteLine("✅ CDP 通道可用（阶段 0.2 通过）");
+        return 0;
+    }
+
     private static int RingInfo(Dictionary<string, string> o)
     {
         var configured = o.GetValueOrDefault("dir");

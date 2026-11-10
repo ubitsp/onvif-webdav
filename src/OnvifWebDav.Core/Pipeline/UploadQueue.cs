@@ -15,7 +15,13 @@ public sealed class UploadQueue : IAsyncDisposable
     private const int MaxAttempts = 12;
 
     private readonly LocalSpool _spool;
-    private readonly Func<WebDavClient?> _davFactory;
+    private readonly Func<IRemoteStorage?> _davFactory;
+
+    /// <summary>"存储未就绪"只播报一次，避免每 60 秒刷屏。</summary>
+    private bool _storageMissingWarned;
+
+    /// <summary>后端类型也只在第一次上传时说一遍。</summary>
+    private bool _backendLogged;
     private readonly AppLog _log;
     private readonly AppStatus _status;
     private readonly SemaphoreSlim _signal = new(0);
@@ -39,7 +45,7 @@ public sealed class UploadQueue : IAsyncDisposable
 
     public int Parallelism { get; init; } = 2;
 
-    public UploadQueue(LocalSpool spool, Func<WebDavClient?> davFactory, AppLog log, AppStatus status,
+    public UploadQueue(LocalSpool spool, Func<IRemoteStorage?> davFactory, AppLog log, AppStatus status,
         Func<bool?>? moveSupportProvider = null,
         QuotaMonitor? quota = null,
         Func<StorageQuotaConfig>? quotaConfigProvider = null)
@@ -159,9 +165,29 @@ public sealed class UploadQueue : IAsyncDisposable
         var dav = _davFactory();
         if (dav is null)
         {
-            _log.Warn("upload", "WebDAV 未配置，任务保留在本地等待");
+            // 只告警一次。每 60 秒刷一行会把真正的错误淹掉，而这个状态可能持续很久。
+            if (!_storageMissingWarned)
+            {
+                _storageMissingWarned = true;
+                _log.Warn("upload",
+                    "存储后端未就绪：WebDAV 没填地址，或夸克还没取到会话。" +
+                    "上传任务会一直留在本地，不会丢 —— 配好之后会自动补传。");
+                _status.LastError = "存储未就绪，上传已暂停";
+            }
+
             await Task.Delay(TimeSpan.FromSeconds(60), ct).ConfigureAwait(false);
             return;
+        }
+
+        _storageMissingWarned = false;
+
+        // 每个后端实例只播报一次实际类型。排查"日志说上传成功但云端没有"时，
+        // 这行是最关键的证据 —— 它能证明这次上传到底交给了哪个后端。
+        if (!_backendLogged)
+        {
+            _backendLogged = true;
+            _log.Info("upload", $"本次上传使用的后端：{dav.GetType().Name}（{dav.DisplayName}，" +
+                                $"支持 MOVE={dav.SupportsMove}，删除释放配额={dav.QuotaReleasesImmediately}）");
         }
 
         job.State = JobState.Uploading;
@@ -258,7 +284,7 @@ public sealed class UploadQueue : IAsyncDisposable
     /// 上传前的配额守卫：够就放行；低于告警线只提示；低于暂停线就停传（可选先自动删最旧的）。
     /// 服务端不返回配额时一律放行，不能因为查不到就把功能卡死。
     /// </summary>
-    private async Task<bool> EnsureSpaceAsync(WebDavClient dav, JobRecord job, CancellationToken ct)
+    private async Task<bool> EnsureSpaceAsync(IRemoteStorage dav, JobRecord job, CancellationToken ct)
     {
         var cfg = _quotaConfigProvider?.Invoke();
         if (cfg is null || !cfg.Enabled || _quota is null) return true;
@@ -329,7 +355,7 @@ public sealed class UploadQueue : IAsyncDisposable
         return true;
     }
 
-    private async Task<bool> UploadWithPartAsync(WebDavClient dav, string remotePath, string localFile,
+    private async Task<bool> UploadWithPartAsync(IRemoteStorage dav, string remotePath, string localFile,
         CancellationToken ct)
     {
         var size = new FileInfo(localFile).Length;

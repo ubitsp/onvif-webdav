@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using OnvifWebDav.Storage;
 
 namespace OnvifWebDav.Config;
 
@@ -101,9 +102,53 @@ public sealed class WebDavConfig
 /// 云端配额守卫。阿里云盘只有 105G，录像只增不减必然撑爆，
 /// 所以在每次上传前看一眼剩余空间：够就传，不够就告警/暂停/（可选）删最旧的腾地方。
 /// </summary>
-public sealed class StorageQuotaConfig
+/// <summary>录像存到哪里。两个后端共用 IRemoteStorage 抽象。</summary>
+public enum StorageBackend
 {
-    public bool Enabled { get; set; } = true;
+    WebDav = 0,
+    Quark = 1,
+}
+
+/// <summary>
+/// 夸克网盘后端。
+///
+/// 和 WebDAV 最大的不同：它没有账号密码，只有**浏览器会话 Cookie**。
+/// Cookie 靠 CDP 从夸克浏览器里捞（浏览器必须带 --remote-debugging-port 启动），
+/// 捞到之后可以缓存起来重复用 —— 服务端每次响应都会下发新的 __puus，会话会自己续下去。
+/// </summary>
+public sealed class QuarkConfig
+{
+    public string BaseUrl { get; set; } = "https://drive-pc.quark.cn";
+
+    /// <summary>夸克浏览器的调试端口。要和启动参数 --remote-debugging-port 一致。</summary>
+    public int CdpPort { get; set; } = 9222;
+
+    /// <summary>
+    /// quark.exe 的完整路径。
+    /// **绿色版/自定义安装位置必须填** —— 这类安装不在任何标准路径下，程序没法自己猜。
+    /// 第一次成功从运行中的进程反查到之后会自动记在这里。
+    /// </summary>
+    public string ExePath { get; set; } = "";
+
+    /// <summary>根目录（空 = 网盘根）。录像会放在这下面。</summary>
+    public string RootPath { get; set; } = "/onvif";
+
+    /// <summary>DPAPI 加密后的 Cookie（落盘用）。有它就不必每次启动都开浏览器。</summary>
+    public string CookieEnc { get; set; } = "";
+
+    /// <summary>Cookie 是什么时候取的（UTC）。太旧的会话优先重新捞一次。</summary>
+    public DateTime CookieAtUtc { get; set; }
+
+    /// <summary>取 Cookie 时浏览器报的 UA。上传签名里的 x-oss-user-agent 必须和它一致。</summary>
+    public string UserAgent { get; set; } = "";
+
+    /// <summary>明文 Cookie。只存在于内存，不序列化。</summary>
+    [JsonIgnore]
+    public string Cookie { get; set; } = "";
+}
+
+public sealed class StorageQuotaConfig
+{    public bool Enabled { get; set; } = true;
 
     /// <summary>剩余空间低于这个值（GB）就把状态标黄并告警。</summary>
     public int WarnBelowGb { get; set; } = 10;
@@ -229,6 +274,12 @@ public sealed class AppConfig
     public WebConfig Web { get; set; } = new();
     public SystemConfig System { get; set; } = new();
     public StorageQuotaConfig Quota { get; set; } = new();
+    public QuarkConfig Quark { get; set; } = new();
+
+    /// <summary>当前用哪个存储后端。切换后要重启录像服务。</summary>
+    public StorageBackend StorageBackend { get; set; } = StorageBackend.WebDav;
+
+    public bool UseQuark => StorageBackend == StorageBackend.Quark;
 
     public CameraConfig? PrimaryCamera =>
         Cameras.FirstOrDefault(c => c.Enabled) ?? Cameras.FirstOrDefault();
@@ -250,6 +301,13 @@ public sealed class AppConfig
 
         WebDav.PasswordEnc = SecretProtector.Protect(WebDav.Password);
         Web.PasswordEnc = SecretProtector.Protect(Web.Password);
+
+        // 夸克的 Cookie 等价于账号凭证，落盘必须加密
+        if (Quark.Cookie.Length > 0)
+        {
+            Quark.CookieEnc = SecretProtector.Protect(Quark.Cookie);
+            Quark.CookieAtUtc = DateTime.UtcNow;
+        }
     }
 
     /// <summary>把 *Enc 解密到内存明文（加载后调用）。</summary>
@@ -260,5 +318,6 @@ public sealed class AppConfig
 
         WebDav.Password = SecretProtector.Unprotect(WebDav.PasswordEnc);
         Web.Password = SecretProtector.Unprotect(Web.PasswordEnc);
+        Quark.Cookie = SecretProtector.Unprotect(Quark.CookieEnc);
     }
 }

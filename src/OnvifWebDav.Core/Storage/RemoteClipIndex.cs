@@ -18,7 +18,7 @@ public sealed class RemoteClipIndex
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
 
-    private readonly WebDavClient _dav;
+    private readonly IRemoteStorage _dav;
     private readonly AppLog? _log;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
 
@@ -43,7 +43,7 @@ public sealed class RemoteClipIndex
         _log?.Warn("index", message);
     }
 
-    public RemoteClipIndex(WebDavClient dav, AppLog? log = null)
+    public RemoteClipIndex(IRemoteStorage dav, AppLog? log = null)
     {
         _dav = dav;
         _log = log;
@@ -86,7 +86,7 @@ public sealed class RemoteClipIndex
         CancellationToken ct)
     {
         var dir = ClipsDir(cameraId, localDate);
-        var entries = await _dav.PropFindAsync(dir, 1, ct).ConfigureAwait(false);
+        var entries = await _dav.ListAsync(dir, 1, ct).ConfigureAwait(false);
 
         var list = new List<ClipInfo>();
         foreach (var e in entries)
@@ -126,7 +126,7 @@ public sealed class RemoteClipIndex
     /// <summary>列出有索引的日期（PROPFIND index 目录，比逐日探测快得多）。</summary>
     public async Task<List<DateTime>> GetDatesAsync(string cameraId, CancellationToken ct)
     {
-        var entries = await _dav.PropFindAsync($"{cameraId}/index", 1, ct).ConfigureAwait(false);
+        var entries = await _dav.ListAsync($"{cameraId}/index", 1, ct).ConfigureAwait(false);
 
         var dates = new List<DateTime>();
         foreach (var e in entries)

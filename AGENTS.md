@@ -980,3 +980,281 @@ MSYS_NO_PATHCONV=1 dotnet run --project tools/OnvifWebDav.Probe -- upload-race -
     不能靠段内 PTS。估的时候用中位数，别用最大值（中间被 Trim 掉一段就会虚高）。
 52. **网页的每个资源请求都会触发一次"查元数据"**。任何 `FindClipAsync` 级别的远端读取都必须有缓存，
     否则一页缩略图就能把 WebDAV 打爆；日志也要节流，不然真正的错误会被自己的重试日志淹没。
+
+### 夸克网盘：CDP 取会话与 API 探测（阶段 0）
+
+计划是把夸克网盘当成 WebDAV 之外的第二存储后端。落地前必须先回答两个问题：
+**(a)** 能不能稳定拿到会话；**(b)** .NET 的 TLS 指纹会不会被夸克风控。
+
+53. **CDP 取 Cookie 走 `Storage.getCookies`，不要 `Network.getAllCookies`**。
+    后者需要先 `Network.enable` 且只在页面的 target 上有效；前者在 browser target 上直接可用。
+    WebSocket 回包是**多帧拼接**的，必须一直读到 `EndOfMessage` 才能解析 JSON，
+    按单帧读会随机截断（长 Cookie 列表几乎必然截断）。
+54. **`__puus` 是滚动令牌**。每次调 API 服务端都会 `Set-Cookie: __puus=...` 下发新值，
+    所以 HttpClient 直连时**要把响应的 Set-Cookie 合并回会话**，否则几小时后就会失效。
+    反过来说：只要程序活着并在调 API，就不需要重新开浏览器。
+55. **夸克 API 的动词是 GET，不是 POST**。所有 `/1/clouddrive/...` 查询接口用 POST 一律返回
+    `HTTP 405 / code=-1 / "Request method 'POST' not supported"`。
+    ⚠️ 这个错误**极容易被误判成"被风控拦截"或"路径写错"** —— 因为它看起来像网关拒绝。
+    判断依据：405 带结构化 JSON 信封 = 请求已达业务层，网络/Cookie/TLS 都没问题，只是动词不对。
+    真正的风控拦截表现为 403、412、超时、或返回 HTML。
+56. **`drive.quark.cn` 和 `drive-pc.quark.cn` 都能用**，返回内容一致。
+    统一用 `drive-pc.quark.cn`（PC 客户端习惯的域，社区实现也都用它）。
+    两个域都必须带固定参数 `pr=ucpro&fr=pc`。
+57. **判断"直连是否可用"必须用矩阵扫描**（host × method 全组合），不要一次只试一个组合。
+    这次就是靠矩阵一次跑出结论，省掉了"改一次跑一次"的来回。
+    探针命令：`probe quark-probe --cdp --matrix`。
+
+探测结论（2026-11-10）：
+
+```
+https://drive-pc.quark.cn  GET  → 200 ✔ ｜ POST → 405
+https://drive.quark.cn     GET  → 200 ✔ ｜ POST → 405
+member: 已用 XX GB / 总 XX GB（会员配额正常返回）
+file/sort: 根目录 10 项正常返回
+Set-Cookie: __puus（续期生效）
+```
+
+→ **.NET SChannel 的 TLS 指纹没有被拦，不需要 `UseBrowserTransport`。**
+CDP 只用来"开机时捞一次 Cookie"，业务请求全部走 HttpClient。
+
+### 夸克网盘：上传链路（阶段 1 前置，已跑通）
+
+`quark-selftest --write` 已全绿：建目录 → pre → auth → PUT 分片 → 合并回调 → finish → 下载读回 → 彻底删除。
+
+58. **`upload/auth` 的 `auth_meta` 是 OSS string-to-sign 的原文，是一个用 `\n` 分隔的字符串，不是对象。**
+    把它当 `{bucket, object_key, callback}` 这种对象传，服务端一律回 `HTTP 500 inner error`
+    （不是 400，因为它在签名阶段就崩了）。
+    正确形态（PUT 分片，7 行）：
+    ```
+    PUT
+    (Content-MD5，空行)
+    text/plain                              ← Content-Type
+    Tue, 10 Nov 2026 13:56:29 GMT           ← Date
+    x-oss-date:Tue, 10 Nov 2026 13:56:29 GMT
+    x-oss-user-agent:aliyun-sdk-js/1.0.0 Chrome 144.0.0.0 on Windows 10 64-bit
+    /ul-sz/{obj_key}?partNumber=1&uploadId={upload_id}
+    ```
+    ⚠ 最后一行 CanonicalizedResource **要带 bucket 前缀**（`/ul-sz/...`），
+    但实际 PUT 的 URL 里**不带**。
+    ⚠ `x-oss-user-agent` 必须和真实请求头逐字一致（我们固定用 `QuarkApiClient.OssUserAgent`）。
+
+59. **`upload/pre` 返回的 `upload_url` 是个陷阱**。实测值是 `http://pds.quark.cn`，
+    这个域名 **DNS 直接 NXDOMAIN**，不可能拿来上传。
+    真实上传地址是 `https://{bucket}.pds.quark.cn/{obj_key}`，
+    而 `ul-sz.pds.quark.cn` 会 CNAME 到 `ccp-sz3-sz-*.cn-shenzhen.oss.aliyuncs.com`。
+    别去猜 `oss-cn-xxx.aliyuncs.com`，桶名不是裸的 `ul-sz`。
+
+60. **哪怕只有一个分片，也必须走 CompleteMultipartUpload + 回调，否则 finish 必失败。**
+    少了合并这一步，`upload/finish` 回 `HTTP 400 request cpp error[complete file failed!]`
+    —— 因为夸克服务端是靠 **OSS 回调**（`x-oss-callback`）才知道文件传完的，不是靠 finish。
+    合并请求：
+      · `POST https://{bucket}.pds.quark.cn/{obj_key}?uploadId={upload_id}`
+      · body = `<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"..."</ETag></Part></CompleteMultipartUpload>`
+      · 头：`Content-MD5`（那段 XML 的 MD5 base64）、`Content-Type: application/xml`、
+        `x-oss-callback`（pre 返回的 callback 对象转 JSON 再 base64）
+      · auth_meta 比 PUT 多两行，自定义头按字典序排：
+        `Content-MD5` / `Content-Type` / `Date` / `x-oss-callback` / `x-oss-date` / `x-oss-user-agent`
+      · 成功返回 `{"Status":"OK"}`
+
+61. **`format_type` 传的是完整 MIME（`video/mp4`），不是扩展名。** 传扩展名不报错，
+    但网盘里文件类型会显示成"未知"。`upload/finish` 会把 format_type 原样回显，可用来验证。
+
+62. **`upload/finish` 的 body 只有两个字段：`obj_key` 和 `task_id`。**
+    传 fid/md5/size/part_number 那些是多余猜测。它返回的 `fid` 才是最终文件 id
+    （`pre` 里那个 `fid` 不是最终值，实测两者不同 —— 别复用 pre 的 fid 做映射）。
+
+63. **下载 `download_url` 自带签名参数，但还会校验 Cookie/UA/Referer。**
+    裸 HttpClient（默认 UA）请求 `dl-pc-sz.pds.quark.cn` 会 403。
+    必须把会话的 Cookie + UA + `Referer: https://pan.quark.cn/` 一起带上。
+
+64. **抓网页真实请求的办法：在页面里 hook `window.fetch` 和 `XMLHttpRequest.prototype`。**
+    官方文档没有的参数（比如 auth_meta）猜是猜不出来的 —— 这轮猜了 4 种形态全 500，
+    抓一次包 5 秒就定死了。命令：`probe quark-capture`，然后在网页里手动上传一个小文件。
+    ⚠ 页面刷新会丢掉 hook，得重新注入。
+
+### 阶段 1：IRemoteStorage 抽象 + 夸克后端（已完成）
+
+原来所有调用点直接依赖 `WebDavClient`。接第二个后端前先把它抽成接口：
+
+```
+IRemoteStorage
+  DisplayName / SupportsMove / QuotaReleasesImmediately
+  EnsureDirectoryAsync / PutFileAsync / MoveAsync / GetQuotaAsync / HeadLengthAsync
+  GetStringWithEtagAsync / PutStringAsync / DownloadToFileAsync / ListAsync / DeleteAsync
+```
+
+`DavEntry` 改名 `RemoteEntry` 并**多了一个 `Id` 字段**（见第 68 条），`StorageQuota` 一起搬到
+`OnvifWebDav.Storage`。`WebDavClient` 实现该接口，行为完全不变。
+
+契约测试：`probe quark-storage --bigmb 20 --root /onvif`（12 步全绿）。
+
+65. **`upload/pre` 的 `parallel_upload` 必须是 `false`**。设成 `true` 时，第 2 个分片起
+    直接 400：`NoHashContext / Has No Hash Context in Parallel Multipart file`。
+    那是另一套"并行上传 + hash context"协议，网页版会先建上下文，我们不走那套。
+    小文件看不出问题（只有 1 片），一旦文件超过分片大小立刻爆。
+
+66. **夸克的目录列表是异步索引的 —— `finish` 返回后立刻列目录看不到刚传的文件**，
+    要过 1~2 秒才出现。这不是接口慢，是索引延迟。
+    症状极具误导性：上传明明成功（finish 返回了 fid 和 size），紧接着 HeadLength/读回全返回 null，
+    而过几秒再查又正常了。
+    对策两层：
+      · `PutFileAsync` 成功后把 (fid, size, mtime) 直接写进本进程的 `_statCache`，
+        后续 Stat 走缓存，根本不去碰列表
+      · 其它情况 `StatAsync` 重试 3 次 × 500ms
+
+67. **夸克没有按路径操作的能力，只有 fid**。所有"按路径读/写/删"都要先解析成 fid。
+    映射表 `<数据目录>/quark-fids.json` 落盘，key 是含根目录的绝对路径。
+    · 文件里存 `uid`（Cookie 里的 `__uid`）做账号指纹，换账号时整体作废 —— **fid 只在账号内有效**
+    · 映射丢了不致命：找不到就列父目录按名字查，查到再补回映射（自愈）
+    · 写映射表用"临时文件 + File.Move 覆盖"，避免写一半断电把表写坏
+
+68. **`RemoteEntry.Href` 必须是"相对存储根"的路径，不能带配置里的根目录。**
+    根目录的拼接只能发生在**最外层入口**一处（`KeyOf`），内部方法之间传的已是含根 key。
+    这轮踩的坑：`StatAsync` 把含根的 key 又传给 `ListAsync`，后者按约定再拼一次根，
+    变成 `/onvif/onvif/...`，结果是"文件明明在，就是查不到"。
+    所以 `RemoteEntry` 带了 `Id`（夸克填 fid）—— 内部按 fid 查，不用再靠路径来回拼。
+
+69. **夸克的删除不能当作"配额立刻回来"**。`DeleteAsync` 用 `action_type=2`（进回收站），
+    所以 `QuotaReleasesImmediately = false`。配额守卫必须按这个来：
+    删了 10GB 但回收站还占着，下一段录像照样放不下。
+    （`action_type=40` 是彻底删除，权限上不一定允许，也别拿来做常规轮转。）
+
+70. **夸克会话可以本地缓存，不必每次开浏览器**。
+    依据是服务端每次响应都下发 `Set-Cookie: __puus` 滚动续期，只要程序在跑就一直有效。
+    `RefreshQuarkSessionAsync` 的顺序：先用缓存的 Cookie 打一次 member 校验 → 失败才走 CDP 重捞。
+    Cookie 和密码等价，落盘必须走 `SecretProtector`（DPAPI）。
+
+71. **Git Bash 会把 `--root /onvif` 改写成 `C:/Users/.../onvif`**，然后夸克报
+    `bad file name :[C:]`。这是 MSYS 的路径转换（见老坑第 8 条），跑探针时要加
+    `MSYS_NO_PATHCONV=1` 前缀。
+
+72. **⚠️ 配额裁剪在"删除不释放配额"的后端上会把录像删光。**
+    `RetentionPruner.PruneOldestAsync` 原来的逻辑是：删一天 → 查配额 → 够了就停。
+    WebDAV 上没问题（删了就释放）。但夸克删除只进回收站，配额**永远不涨**，
+    于是"够了没"永远为 false → 循环把 dates 里所有天全删完。
+    这是不可逆的数据损失，比上传失败严重得多。
+    修复：`IRemoteStorage.QuotaReleasesImmediately == false` 时改用**累计删除量**判断
+    （`freedBytes >= needBytes`），而不是查配额。日志里也会明确提示"配额要等回收站清理"。
+    新增后端时务必先想清楚：这个后端删了之后，可用空间真的会立刻变多吗？
+
+### 夸克有两种形态：网页版 和 网盘客户端（关键差异在页面 URL）
+
+用户机器上跑的是**夸克网盘客户端**（Electron，quark.exe），不是浏览器网页版。
+CDP 里能看到的 page target 全是自定义协议：
+
+```
+uccd://cloud.quark/clouddrive/renderer/index.html?name=main#/list/all
+uccd://cloud.quark/clouddrive/renderer/setting-window.html
+uccd://cloud.quark/clouddrive/renderer/vip.html
+uccd://cloud-pdfviewer.quark/renderer/pdf-viewer.html
+```
+
+73. **客户端的页面 URL 里是 `cloud.quark`，不含 `quark.cn`。**
+    早期 `FindQuarkPageAsync` 用 `url.Contains("quark.cn")` 挑页面，在客户端上**一个都匹配不到**，
+    导致 `EvaluateInPageAsync` 静默返回 null。
+    症状很隐蔽：**取 Cookie 完全正常**（`Storage.getCookies` 是 browser 级域，不依赖页面），
+    业务 API 也正常（走 HttpClient），只有"页面内执行"这一条路悄悄断掉 ——
+    直到跑 `quark-capture` 时才发现。
+    修复：改成打分挑选页面，两种形态都认：
+      · `pan.quark.cn` 网页版 → 100（同源，页面内 fetch 不会撞 CORS）
+      · `uccd://cloud.quark/clouddrive/...` 客户端主窗口 → 90
+      · 其它 `uccd://*quark*` → 50
+      · 普通 `*quark.cn*` → 40
+
+74. **客户端下 API 域名没变**，实测（2026-11-10，客户端 QuarkPC/7.4.7.1036）：
+    ```
+    drive-pc.quark.cn  GET → 200 ✔   POST → 405
+    drive.quark.cn     GET → 200 ✔   POST → 405
+    页面内 fetch（uccd:// 页面）→ 200 ✔   ← CORS 没被挡
+    ```
+    Cookie 域仍是 `quark.cn`（35 项，`__puus`/`__pus` 都在）。
+    所以**页面形态变化不影响生产链路** —— 业务请求全走 HttpClient，
+    页面内执行只服务于 `quark-capture` 这类开发工具。
+
+75. **`OssUserAgent` 里的 Chrome 版本号可以硬编码，不必跟着内核走。**
+    它只是 OSS 签名串里的一个自定义头，我们自己在 auth_meta 和实际 PUT 里写同一个字符串，
+    服务端只比对两者一致，不校验这个 UA 是否为真。所以客户端内核升级不会影响上传。
+
+### 能不能从 uccd:// 页面直接取认证信息？——不能，也不需要
+
+实测（`probe quark-page`，2026-11-10，客户端 QuarkPC/7.4.7.1036）：
+
+```
+页面 origin : uccd://cloud.quark
+document.cookie : 0 字符
+localStorage    : 29 项（USER_INFO / 设备名 / 列表缓存 / 埋点），无凭证
+IndexedDB       : quark-cloud-drive, response-cache, timeline, im —— 业务缓存
+```
+
+76. **`uccd://` 是 Chromium 自定义 scheme，它的 origin 和 `quark.cn` 完全无关。**
+    夸克的 Cookie 全部挂在 `*.quark.cn` 域下，Chromium 不会把它们暴露给一个
+    `uccd://cloud.quark` 页面 —— 所以 `document.cookie` 必然是空串。
+    再加上关键项是 `HttpOnly`，脚本本来也读不到。
+    **取值入口只能保持 browser 级 `Storage.getCookies`（见第 53 条）。**
+
+77. **Cookie 的域分布（实测，去重前 41 项 / 去重后 35 项）：**
+    ```
+    .quark.cn                  13 项   ← __puus(248) __pus(120) __ktd(24) 都在这
+    www.quark.cn               12 项
+    pan.quark.cn                9 项   ← ctoken(24)
+    b.quark.cn                  3 项
+    .uop.quark.cn               2 项
+    browser-agent-api.quark.cn  1 项
+    access-open.quark.cn        1 项
+    ```
+    `__puus` 是**容器级 Cookie（`.quark.cn`）**，所有子域共享 ——
+    这正是"客户端页面读不到、但 API 认它"的原因。
+
+78. **同名 Cookie 去重规则（取 domain 最具体）已验证不会取错。**
+    `ParseCookies` 对同名项 `OrderByDescending(Domain.Length).ThenByDescending(Path.Length)`。
+    风险是"pan.quark.cn 也存一份 __puus 且值不同" → 取到对不上的令牌。
+    实测各关键项都只有 1 份：`__puus`/`__pus`/`__ktd` 在 `.quark.cn`，`ctoken` 在 `pan.quark.cn`。
+    以后怀疑环境变了，跑 `probe quark-page` 一眼能看出来（多份且长度不同会打 ⚠）。
+
+### 阶段 2：存储设置面板（已完成）
+
+原来的 `WebDavPanel` 换成 `StoragePanel`（`src/OnvifWebDav.App/UI/StoragePanel.cs`），
+主界面标签页从「WebDAV」改成「存储」。一个面板管两个后端：
+
+```
+存储后端      ○ WebDAV（NAS / Nextcloud / 自建）   ○ 夸克网盘（会员空间）
+   ↓ 选中哪个只显示哪一段，另一段 Visible=false
+WebDAV        服务地址 / 用户名 / 密码 / 根目录 / 超时 / 证书 + 测试按钮
+夸克网盘      调试端口 / 网盘根目录 / API 地址 / 会话状态
+              [从浏览器获取会话] [测试夸克连接]
+云端空间守卫  两个后端共用（它操作的是 IRemoteStorage，不认识具体后端）
+```
+
+79. **夸克那块不能做成"输账号密码"**。它的认证只有浏览器会话，所以界面上是
+    「获取会话」按钮 + 一行状态文字（`未获取 / 已从浏览器获取(时间) / 本地缓存(时间)`）。
+    颜色也区分：未获取是橙红，就绪是绿色。
+80. **`FormBuilder.Group` 不能嵌套。** 它是 `Dock=Top + AutoSize` 的组合，
+    套在另一个 Group 里会被压成一条线（代码里原有注释已经警告过，这次差点又踩）。
+    会话状态那行直接作为 `FormBuilder.Form` 的一行，不要包成子 GroupBox。
+81. 切换后端**必须点「保存并应用」**才生效（会重启录像服务）。
+    单独点「测试」只验证当前界面参数，不改运行中的后端。
+
+### 自动拉起夸克客户端（QuarkLauncher）
+
+用户的痛点是"每次都得手动退出夸克 → 带 --remote-debugging-port 重启"，这轮自动化掉了。
+
+82. **夸克是单实例应用，已经在跑的进程会直接忽略新的命令行参数。**
+    所以"带调试端口启动"这件事，只有在**当前没有 quark 进程**时才有效。
+    `EnsureQuarkDebugPortAsync` 的分支：
+      · 端口已通 → 直接用
+      · 端口不通 + 没在跑 → `QuarkLauncher.Launch` 拉起来，`WaitForPortAsync` 最多等 30 秒
+      · 端口不通 + 在跑 → **不碰**（杀进程会丢用户正在做的事），只在日志/界面提示"先完全退出"
+    实测夸克冷启动到 DevTools 端口就绪约 3~8 秒。
+
+83. **绿色版夸克不在任何标准路径下，必须靠配置或进程反查。**
+    这台机器上它装在 `<夸克安装目录>\\quark.exe`（本项目里是绿色版，放在 third_party/Quark/） ——
+    `%LOCALAPPDATA%\Programs\Quark` 那套常见路径一个都命中不了。
+    `QuarkLauncher.TryFindExe(configuredPath)` 的优先级：
+      配置里的 `QuarkConfig.ExePath` → 运行中进程的 `MainModule.FileName` → 常见安装路径
+    首次通过进程反查成功后，路径会自动写回配置，之后即使进程没跑也能直接启动。
+    界面上有「程序路径 + 浏览…」，绿色版用户可以手动指定。
+
+84. **诊断顺序很重要**：怀疑"取不到会话"时先跑 `probe quark-launch`，
+    它会分别报"进程是否在跑 / 能否定位 exe / 端口通不通"，一眼看出卡在哪一环。
+    只查不动，不会启动也不会杀进程。

@@ -45,7 +45,7 @@ public sealed class MediaCache
 
     /// <summary>拿到本地文件路径；缓存没有就从 WebDAV 下。返回 null 表示远端 404。</summary>
     public async Task<string?> EnsureAsync(string cameraId, string clipId, string remotePath, bool isVideo,
-        WebDavClient dav, CancellationToken ct)
+        IRemoteStorage dav, CancellationToken ct)
     {
         var local = isVideo ? VideoPath(cameraId, clipId) : ThumbPath(cameraId, clipId);
         if (File.Exists(local) && new FileInfo(local).Length > 0)
