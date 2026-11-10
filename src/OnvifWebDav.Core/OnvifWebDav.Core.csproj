@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <RootNamespace>OnvifWebDav</RootNamespace>
+    <AssemblyName>OnvifWebDav.Core</AssemblyName>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,36 @@
+# ---------- 构建产物 ----------
+bin/
+obj/
+publish/
+TestResults/
+*.user
+*.suo
+.vs/
+.idea/
+
+# ---------- 第三方二进制 ----------
+# ffmpeg.exe / ffprobe.exe 各约 170MB，不该进仓库。
+# 用 scripts/get-ffmpeg.ps1 现下：它会在 third_party/ffmpeg/bin 里放好两个 exe。
+third_party/
+
+# ---------- 本地运行时数据（敏感） ----------
+# 真实配置含摄像头密码、WebDAV 密码，存放在 %LocalAppData%\OnvifWebDav\config.json，
+# 本来就在仓库外；下面几条是"万一有人拷进来"的兜底。
+config.json
+*.secrets.json
+appsettings.*.local.json
+
+# ---------- 日志与临时文件 ----------
+*.log
+*.tmp
+*.bak
+*.zip
+Thumbs.db
+.DS_Store
+
+# ---------- 工具目录 ----------
+.workbuddy/
+
+# ---------- 证书 ----------
+*.pfx
+*.p12

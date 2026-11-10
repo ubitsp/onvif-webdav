@@ -1,0 +1,17 @@
+<Project>
+
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
+    <!-- 本机只装了 SDK 10，用 SDK 10 编 net9.0；关掉 EOL 警告，否则满屏 NETSDK1138 -->
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <Version>1.0.0</Version>
+    <Product>ONVIF 运动录像 → WebDAV</Product>
+    <Company>onvif-webdav</Company>
+  </PropertyGroup>
+
+</Project>

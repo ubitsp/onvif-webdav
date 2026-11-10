@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <RootNamespace>OnvifWebDav.Web</RootNamespace>
+    <AssemblyName>OnvifWebDav.Web</AssemblyName>
+    <!-- 关键：Web 项目只导出工厂方法，不能生成入口，否则与 WinExe 的 Main 冲突 -->
+    <OutputType>Library</OutputType>
+    <!-- 关掉隐式内容项，避免 wwwroot 重复包含（NETSDK1022） -->
+    <EnableDefaultContentItems>false</EnableDefaultContentItems>
+    <EnableDefaultNoneItems>false</EnableDefaultNoneItems>
+    <!-- 关掉静态 Web 资源清单：我们已经在 WebHostFactory 里显式指定 WebRootPath，
+         留着它反而会生成指向本项目输出目录的 manifest，发布到别的机器容易 404 -->
+    <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\OnvifWebDav.Core\OnvifWebDav.Core.csproj" />
+  </ItemGroup>
+
+  <!-- wwwroot 必须随引用方一起复制到输出目录，否则 App 运行时 404 -->
+  <ItemGroup>
+    <Content Include="wwwroot\**\*.*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

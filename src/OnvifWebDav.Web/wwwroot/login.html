@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · 录像回看</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body class="login-body">
+  <form class="login-card" method="post" action="/login">
+    <h1>录像回看</h1>
+    <p class="muted">请输入访问密码</p>
+    <input type="password" name="password" placeholder="访问密码" autocomplete="current-password" autofocus required>
+    <input type="hidden" name="returnUrl" id="returnUrl" value="/">
+    <button type="submit">进入</button>
+    <div class="login-error">{{ERROR}}</div>
+  </form>
+  <script>
+    (function () {
+      var p = new URLSearchParams(location.search);
+      var r = p.get('returnUrl');
+      if (r && r.charAt(0) === '/' && r.charAt(1) !== '/') document.getElementById('returnUrl').value = r;
+    })();
+  </script>
+</body>
+</html>

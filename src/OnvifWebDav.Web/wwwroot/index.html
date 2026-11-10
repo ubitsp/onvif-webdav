@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#ffffff">
+<title>录像回看</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <div class="brand">🎥 <span id="camName">录像回看</span></div>
+  <div id="status"><span class="dot" id="stateDot"></span><span id="stateText">加载中…</span></div>
+  <form method="post" action="/logout" style="margin:0">
+    <button class="ghost" type="submit">退出</button>
+  </form>
+</header>
+
+<main>
+  <aside>
+    <h2>有录像的日期</h2>
+    <div id="dates"></div>
+  </aside>
+
+  <section>
+    <div class="toolbar">
+      <input type="date" id="datePick">
+      <button id="btnRefresh">刷新</button>
+      <span class="muted" id="daySummary"></span>
+    </div>
+
+    <div class="player">
+      <video id="player" controls playsinline preload="metadata"></video>
+      <div class="hint" id="playerHint"></div>
+    </div>
+
+    <div class="timeline">
+      <div class="tl-axis">
+        <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
+      </div>
+      <div class="tl-bars" id="tlBars"></div>
+    </div>
+
+    <ul class="clips" id="clips"></ul>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

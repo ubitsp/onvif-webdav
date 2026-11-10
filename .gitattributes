@@ -1,0 +1,14 @@
+# 行尾策略：源码一律 LF，让 Windows / Linux / CI 与编辑工具行为一致，
+# 避免出现"文件没改但 git 说改了"的假 diff。
+# 只有 VS 解决方案和 PowerShell 脚本保留 CRLF —— 这两类对行尾更敏感。
+*               text=auto eol=lf
+
+*.sln           text eol=crlf
+*.ps1           text eol=crlf
+
+# 二进制，别让 git 尝试转换或合并
+*.exe           binary
+*.dll           binary
+*.png           binary
+*.jpg           binary
+*.ico           binary
