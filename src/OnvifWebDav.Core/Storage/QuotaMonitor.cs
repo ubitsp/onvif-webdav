@@ -91,21 +91,7 @@ public sealed class RetentionPruner
 
             var list = await index.GetDayAsync(cameraId, date, ct);
 
-            foreach (var clip in list)
-            {
-                try
-                {
-                    await dav.DeleteAsync(clip.Path, ct).ConfigureAwait(false);
-                    freedBytes += clip.SizeBytes;
-                }
-                catch (Exception ex) { log?.Warn("retention", $"删除 {clip.Path} 失败：{ex.Message}"); }
-
-                if (!string.IsNullOrWhiteSpace(clip.Thumb))
-                {
-                    try { await dav.DeleteAsync(clip.Thumb, ct).ConfigureAwait(false); }
-                    catch { /* 缩略图丢了不影响 */ }
-                }
-            }
+            freedBytes += await DeleteClipsAsync(dav, list, log, ct).ConfigureAwait(false);
 
             // 索引最后删（它是"文件完整"的权威标记）
             try
@@ -150,5 +136,90 @@ public sealed class RetentionPruner
         }
 
         return new PruneResult(days, clips, quota, false);
+    }
+
+    /// <summary>
+    /// 按日期清理：删掉所有早于 <paramref name="keepFromDate"/> 的天。
+    ///
+    /// 和 <see cref="PruneOldestAsync"/> 的区别：那个是"空间不够了才删，删到够为止"，
+    /// 这个是"到日子就删，不管空间还剩多少"。两者互不冲突，都开也行。
+    /// </summary>
+    public async Task<PruneResult> PruneOlderThanAsync(IRemoteStorage dav, string cameraId,
+        DateTime keepFromDate, AppLog? log, CancellationToken ct)
+    {
+        var index = new RemoteClipIndex(dav, log);
+        var dates = await index.GetDatesAsync(cameraId, ct).ConfigureAwait(false);
+
+        // GetDatesAsync 是倒序的，这里按正序删（从最旧的开始）
+        var expired = dates
+            .Where(d => d.Date < keepFromDate.Date)
+            .OrderBy(d => d)
+            .ToList();
+
+        if (expired.Count == 0)
+        {
+            log?.Info("retention",
+                $"保留策略：没有需要删除的录像（保留自 {keepFromDate:yyyy-MM-dd} 起，" +
+                $"云端共 {dates.Count} 天）");
+            return new PruneResult(0, 0, null, true);
+        }
+
+        var days = 0;
+        var clips = 0;
+
+        foreach (var date in expired)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var list = await index.GetDayAsync(cameraId, date, ct).ConfigureAwait(false);
+
+            await DeleteClipsAsync(dav, list, log, ct).ConfigureAwait(false);
+
+            // 索引最后删（它是"文件完整"的权威标记）。
+            // 顺序反了的话，中途失败会留下"索引指向已删文件"，网页上一点就报错。
+            try
+            {
+                await dav.DeleteAsync(RemoteClipIndex.IndexPath(cameraId, date), ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                log?.Warn("retention", $"删除索引 {date:yyyy-MM-dd} 失败：{ex.Message}");
+            }
+
+            days++;
+            clips += list.Count;
+            log?.Info("retention", $"保留策略：已删除 {date:yyyy-MM-dd} 的 {list.Count} 段录像");
+        }
+
+        log?.Info("retention", $"保留策略完成：删除 {days} 天共 {clips} 段");
+        return new PruneResult(days, clips, null, true);
+    }
+
+    /// <summary>删一天里的所有片段（视频 + 缩略图），返回成功删掉的字节数。</summary>
+    private static async Task<long> DeleteClipsAsync(IRemoteStorage dav, List<ClipInfo> list,
+        AppLog? log, CancellationToken ct)
+    {
+        var freed = 0L;
+
+        foreach (var clip in list)
+        {
+            try
+            {
+                await dav.DeleteAsync(clip.Path, ct).ConfigureAwait(false);
+                freed += clip.SizeBytes;
+            }
+            catch (Exception ex)
+            {
+                log?.Warn("retention", $"删除 {clip.Path} 失败：{ex.Message}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(clip.Thumb))
+            {
+                try { await dav.DeleteAsync(clip.Thumb, ct).ConfigureAwait(false); }
+                catch { /* 缩略图丢了不影响 */ }
+            }
+        }
+
+        return freed;
     }
 }

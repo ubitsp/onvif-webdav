@@ -82,6 +82,10 @@ public sealed class ConfigStore
         cfg.Web ??= new WebConfig();
         cfg.System ??= new SystemConfig();
         cfg.Quota ??= new StorageQuotaConfig();
+        cfg.Retention ??= new RetentionConfig();
+
+        if (cfg.Retention.KeepDays is < 0 or > 3650) cfg.Retention.KeepDays = 0;
+        if (cfg.Retention.CheckHour is < 0 or > 23) cfg.Retention.CheckHour = 3;
 
         if (cfg.Quota.WarnBelowGb is < 0 or > 100000) cfg.Quota.WarnBelowGb = 10;
         if (cfg.Quota.PauseBelowGb is < 0 or > 100000) cfg.Quota.PauseBelowGb = 3;

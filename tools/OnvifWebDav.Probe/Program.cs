@@ -61,6 +61,7 @@ internal static class Program
                 "quark-ls" => await QuarkListRunner.RunAsync(o).ConfigureAwait(false),
                 "quark-overwrite" => await QuarkOverwriteRunner.RunAsync(o).ConfigureAwait(false),
                 "quark-fix-index" => await QuarkFixIndexRunner.RunAsync(o).ConfigureAwait(false),
+                "retention-days" => await RetentionTestRunner.RunAsync(o).ConfigureAwait(false),
                 "events" => await EventsAsync(o).ConfigureAwait(false),
                 "notify-test" => await NotifyTestAsync(o).ConfigureAwait(false),
                 "parse-notify" => ParseNotifyFile(o),
@@ -147,6 +148,11 @@ internal static class Program
               quark-storage [--bigmb 20] [--port 9222] [--base URL]
                   用 IRemoteStorage 契约测夸克后端：建目录 → 小文件 → 读回 → 列目录
                   → 下载 → 20MB 多分片 → 配额 → 映射表重建 → 删除。
+
+              retention-days [--keep 2] [--port 9222]
+                  验证据日期清理（新功能）：在独立目录里造 3 天假数据（2020-01-xx），
+                  跑一次保留策略，确认到期整天空删、未到期不动、可重复执行。
+                  注意：原来的 retention-test 测的是"按空间"清理，两者不同。
 
               quark-fix-index [--apply] [--dir cam1/index] [--root /onvif]
                   修复"同名不覆盖"留下的索引副本：每组挑最近修改的那份写回主文件名，

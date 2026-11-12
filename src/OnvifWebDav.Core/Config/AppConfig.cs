@@ -102,6 +102,26 @@ public sealed class WebDavConfig
 /// 云端配额守卫。阿里云盘只有 105G，录像只增不减必然撑爆，
 /// 所以在每次上传前看一眼剩余空间：够就传，不够就告警/暂停/（可选）删最旧的腾地方。
 /// </summary>
+/// <summary>
+/// 按时间的录像保留策略。
+///
+/// 和「云端空间守卫」是两套互补的规则：
+///  · 空间守卫看**剩余容量**，不够了就删最旧的腾地方
+///  · 保留策略看**日期**，超过 N 天的一律删掉（不管空间还剩多少）
+/// 两个都开也没问题，谁先触发谁先删。
+/// </summary>
+public sealed class RetentionConfig
+{
+    /// <summary>
+    /// 保留天数。0 = 永久保留（关闭按时间清理）。
+    /// 注意是"整天"粒度：设 7 天表示保留今天在内的最近 7 天。
+    /// </summary>
+    public int KeepDays { get; set; }
+
+    /// <summary>每天几点执行清理（本地时间 0~23）。默认凌晨 3 点，避开白天录像高峰。</summary>
+    public int CheckHour { get; set; } = 3;
+}
+
 /// <summary>录像存到哪里。两个后端共用 IRemoteStorage 抽象。</summary>
 public enum StorageBackend
 {
@@ -274,6 +294,7 @@ public sealed class AppConfig
     public WebConfig Web { get; set; } = new();
     public SystemConfig System { get; set; } = new();
     public StorageQuotaConfig Quota { get; set; } = new();
+    public RetentionConfig Retention { get; set; } = new();
     public QuarkConfig Quark { get; set; } = new();
 
     /// <summary>当前用哪个存储后端。切换后要重启录像服务。</summary>

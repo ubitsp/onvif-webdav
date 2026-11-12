@@ -29,6 +29,9 @@ public sealed class AppRuntime : IAsyncDisposable
     /// <summary>云端配额缓存，上传前用它判断要不要停。</summary>
     public QuotaMonitor Quota { get; } = new();
 
+    /// <summary>按天数清理旧录像。StartAsync 时启动，每天在配置的时间点跑一次。</summary>
+    public RetentionService Retention { get; private set; } = null!;
+
     /// <summary>网页服务是否在跑。没跑就没法当推送的回调接收方。</summary>
     public bool WebRunning { get; set; }
 
@@ -67,6 +70,9 @@ public sealed class AppRuntime : IAsyncDisposable
         Recordings = new RecordingsRepository(CreateStorage, Cache, Log);
         Upload = new UploadQueue(Spool, CreateStorage, Log, Status,
             () => StorageSupportsMove, Quota, () => Config.Quota);
+
+        Retention = new RetentionService(CreateStorage, () => Config,
+            () => Config.PrimaryCamera?.Id, Log);
 
         if (!Ffmpeg.IsAvailable)
             Log.Error("runtime", Ffmpeg.MissingMessage);
@@ -319,6 +325,7 @@ public sealed class AppRuntime : IAsyncDisposable
             () => StorageSupportsMove, Quota, () => Config.Quota);
 
         Upload.Start();
+        Retention.Start();
 
         var camera = Config.PrimaryCamera;
         if (camera is null || !camera.Enabled)
@@ -355,6 +362,7 @@ public sealed class AppRuntime : IAsyncDisposable
         }
 
         await Upload.StopAsync(TimeSpan.FromSeconds(8)).ConfigureAwait(false);
+        await Retention.StopAsync().ConfigureAwait(false);
         Status.State = WorkerState.Stopped;
         Status.Message = "已停止";
     }

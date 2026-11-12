@@ -74,6 +74,21 @@ internal sealed class StoragePanel : UserControl
         BackColor = Color.FromArgb(248, 249, 251),
     };
 
+    // ---------------- 录像保留（按天数）----------------
+
+    private readonly NumericUpDown _keepDays = FormBuilder.Num(0, 0, 3650);
+    private readonly NumericUpDown _keepHour = FormBuilder.Num(3, 0, 23);
+
+    private readonly Button _btnPrune = new() { Text = "立即清理一次", AutoSize = true };
+
+    private readonly Label _pruneResult = new()
+    {
+        AutoSize = true,
+        MaximumSize = new Size(620, 0),
+        ForeColor = Color.FromArgb(110, 116, 128),
+        Margin = new Padding(0, 0, 0, 8),
+    };
+
     // ---------------- 配额（两个后端共用）----------------
 
     private readonly CheckBox _quotaEnabled = FormBuilder.Check("启用云端空间守卫", true);
@@ -94,6 +109,7 @@ internal sealed class StoragePanel : UserControl
         _btnOpen.Click += (_, _) => OpenUrl();
         _btnQuarkSession.Click += async (_, _) => await FetchQuarkSessionAsync().ConfigureAwait(true);
         _btnQExe.Click += (_, _) => BrowseQuarkExe();
+        _btnPrune.Click += async (_, _) => await PruneNowAsync().ConfigureAwait(true);
         _btnQuarkTest.Click += async (_, _) => await TestQuarkAsync().ConfigureAwait(true);
 
         _rbDav.CheckedChanged += (_, _) => UpdateVisibility();
@@ -161,6 +177,15 @@ internal sealed class StoragePanel : UserControl
             backendBox,
             _davBox,
             _quarkBox,
+            FormBuilder.Group("录像保留",
+                FormBuilder.Form(
+                    ("保留天数", _keepDays),
+                    ("每天执行时间", _keepHour)),
+                FormBuilder.Hint("超过保留天数的录像会在每天指定时间自动删除（整天删：先删片段和缩略图，" +
+                                 "最后删索引）。填 0 = 永久保留、不自动删。只影响云端，本地本来就只留" +
+                                 "环形缓冲那几分钟。"),
+                _btnPrune,
+                _pruneResult),
             FormBuilder.Group("云端空间守卫",
                 _quotaEnabled,
                 FormBuilder.Form(
@@ -205,6 +230,9 @@ internal sealed class StoragePanel : UserControl
         _qRoot.Text = q.RootPath;
         _qBase.Text = q.BaseUrl;
 
+        _keepDays.Value = Math.Clamp(cfg.Retention.KeepDays, 0, 3650);
+        _keepHour.Value = Math.Clamp(cfg.Retention.CheckHour, 0, 23);
+
         var qq = cfg.Quota;
         _quotaEnabled.Checked = qq.Enabled;
         _quotaWarn.Value = Math.Clamp(qq.WarnBelowGb, 0, 100000);
@@ -234,6 +262,9 @@ internal sealed class StoragePanel : UserControl
         q.CdpPort = (int)_qPort.Value;
         q.RootPath = NormalizeRoot(_qRoot.Text);
         q.BaseUrl = string.IsNullOrWhiteSpace(_qBase.Text) ? "https://drive-pc.quark.cn" : _qBase.Text.Trim();
+
+        cfg.Retention.KeepDays = (int)_keepDays.Value;
+        cfg.Retention.CheckHour = (int)_keepHour.Value;
 
         var qq = cfg.Quota;
         qq.Enabled = _quotaEnabled.Checked;
@@ -429,6 +460,46 @@ internal sealed class StoragePanel : UserControl
         {
             _btnQuarkTest.Enabled = true;
             RefreshQuarkSessionLabel();
+        }
+    }
+
+    private async Task PruneNowAsync()
+    {
+        Collect(_runtime.Config);
+
+        var days = (int)_keepDays.Value;
+
+        if (days <= 0)
+        {
+            _pruneResult.Text = "保留天数为 0（永久保留），没有可清理的。";
+            return;
+        }
+
+        var confirm = MessageBox.Show(this,
+            $"将删除 {days} 天以前的所有录像（云端不可逆，后端支持回收站的话还能捞回）。" + Environment.NewLine +
+            "确定继续？", "确认清理", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
+
+        if (confirm != DialogResult.OK) return;
+
+        _btnPrune.Enabled = false;
+        _pruneResult.Text = "正在清理…";
+
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(15));
+            await _runtime.Retention.RunOnceAsync(days, cts.Token).ConfigureAwait(true);
+
+            _pruneResult.Text = "✔ " + _runtime.Retention.LastResult;
+            _pruneResult.ForeColor = Color.FromArgb(30, 130, 76);
+        }
+        catch (Exception ex)
+        {
+            _pruneResult.Text = "✘ 清理失败：" + ex.Message;
+            _pruneResult.ForeColor = Color.FromArgb(190, 60, 60);
+        }
+        finally
+        {
+            _btnPrune.Enabled = true;
         }
     }
 
