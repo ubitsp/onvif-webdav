@@ -1299,3 +1299,38 @@ WebDAV        服务地址 / 用户名 / 密码 / 根目录 / 超时 / 证书 + 
     `probe quark-ls --path /onvif/cam1/index --root /` 一眼就能看到
     有没有 `(N)` 副本。日志说"上传完成"只代表 `PutFileAsync` 返回了，
     不代表**按路径能读回来的是新内容**。
+
+### ⚠️ 事件订阅"静默死亡"：续订失败后主循环永远卡住
+
+89. **Basic Notification 的续订失败必须能打断主循环，否则事件源会静默死掉。**
+
+    原来的实现：
+    ```
+    RunAsync:  while (!ct.IsCancellationRequested) { await _hub.ReadAsync(ct); ... }
+    RenewLoop: 每 40 秒续订；失败 → 只打一行 WARN → return
+    ```
+    问题：续订失败后**没有任何东西取消主循环**。订阅 60 秒后到期，设备不再推送，
+    而 `ReadAsync` 会一直挂着等数据 —— 摄像头还在工作、运动照常发生，
+    **但再也不会触发录像，而且之后一行日志都不会有**。
+    现场表现：日志里只有一句 `续订失败，订阅可能已失效：ONVIF 连接失败：...`，
+    然后七个小时没有任何事件，也没有任何报错。
+
+    ⚠ 代码里原本有一处注释写着"会话被看门狗中断"，但**看门狗从来没有实现过**
+    （grep 只能找到那句注释）。别被自己的注释骗了。
+
+    修复：`RunAsync` 建一个 linked CTS，续订循环失败时 `Cancel()` 它；
+    `ReadAsync` 用 linked token，被取消时 `break` 出循环 → RunAsync 返回 →
+    CameraWorker 按 5s/15s/60s/180s 退避重连，重新订阅。
+
+    PullPoint 分支没有这个问题：它的续订在循环体内 `await`，失败会直接抛到外层。
+
+90. **`HttpRequestException` 的 Message 只有"An error occurred while sending the request"，
+    真正原因全在 InnerException 里**（SocketException / 连接被重置 / DNS 失败 / 超时）。
+    日志里只打 `ex.Message` 等于什么都没说。
+    修复：`DescribeChain(ex)` 把异常链展开成一行，形如
+    `An error occurred... ← SocketException: 由于目标计算机积极拒绝，无法连接。`
+
+91. **`global.json` 的 `rollForward: latestFeature` 在 SDK 大版本升级后会直接构建失败。**
+    本机 SDK 从 10.0.402 升到 11.0.100 之后，`latestFeature` 只允许同 minor 的更高
+    patch（10.0.x），不会跨到 11，于是报 `dotnet/sdk-not-found`。
+    改成 `latestMajor` 后，有 10 就用 10、没有就用更高的，两种机器都能编。

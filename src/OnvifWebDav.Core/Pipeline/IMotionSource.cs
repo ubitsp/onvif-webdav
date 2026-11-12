@@ -1,3 +1,4 @@
+using System.Text;
 using OnvifWebDav.Config;
 using OnvifWebDav.Diagnostics;
 using OnvifWebDav.Onvif;
@@ -144,14 +145,31 @@ public sealed class BasicNotificationMotionSource : IMotionSource
 
     public async Task RunAsync(CancellationToken ct)
     {
+        // 续订失败必须能打断主循环。否则会出现"静默死亡"：
+        // 订阅 60 秒后到期，设备不再推送，而 ReadAsync 会一直挂着等数据，
+        // 摄像头还在工作、运动照常发生，但再也不会触发录像，且一行日志都没有。
+        using var renewFailed = new CancellationTokenSource();
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, renewFailed.Token);
+
         // 续订放后台，主循环专心收推送
-        var renewTask = RenewLoopAsync(ct);
+        var renewTask = RenewLoopAsync(linked.Token, renewFailed);
 
         try
         {
-            while (!ct.IsCancellationRequested)
+            while (!linked.IsCancellationRequested)
             {
-                var xml = await _hub.ReadAsync(ct).ConfigureAwait(false);
+                string xml;
+
+                try
+                {
+                    xml = await _hub.ReadAsync(linked.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                    when (renewFailed.IsCancellationRequested && !ct.IsCancellationRequested)
+                {
+                    _log?.Warn("events", "续订已失败，主动结束本次订阅，交给上层重建");
+                    break;
+                }
 
                 var events = OnvifEventClient.ParseNotify(xml);
                 if (events.Count == 0)
@@ -183,7 +201,7 @@ public sealed class BasicNotificationMotionSource : IMotionSource
         }
     }
 
-    private async Task RenewLoopAsync(CancellationToken ct)
+    private async Task RenewLoopAsync(CancellationToken ct, CancellationTokenSource failSignal)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(40));
         try
@@ -197,9 +215,30 @@ public sealed class BasicNotificationMotionSource : IMotionSource
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            // 续订失败 = 订阅快过期了，直接结束让上层重建
-            _log?.Warn("events", "续订失败，订阅可能已失效：" + ex.Message);
+            // 续订失败 = 订阅快过期了。除了报错，还要**叫醒主循环**让它退出，
+            // 否则订阅到期后 ReadAsync 永远挂着等数据（见 RunAsync 里的说明）。
+            _log?.Warn("events", "续订失败，订阅可能已失效：" + DescribeChain(ex));
+            failSignal.Cancel();
         }
+    }
+
+    /// <summary>
+    /// 把异常链展开成一行。
+    /// HttpRequestException 的 Message 只有"发送请求时出错"，真正原因
+    /// （SocketException / 连接被重置 / 超时）全在 InnerException 里，不展开就没法排查。
+    /// </summary>
+    private static string DescribeChain(Exception ex)
+    {
+        var sb = new StringBuilder(ex.Message);
+        var inner = ex.InnerException;
+
+        for (var depth = 0; inner is not null && depth < 3; depth++)
+        {
+            sb.Append(" ← ").Append(inner.GetType().Name).Append(": ").Append(inner.Message);
+            inner = inner.InnerException;
+        }
+
+        return sb.ToString();
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
